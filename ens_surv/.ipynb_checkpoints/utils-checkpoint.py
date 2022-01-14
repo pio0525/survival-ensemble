@@ -68,7 +68,7 @@ def LM_transformer2(df,ID_col, T_col,E_col,window,S,measure_T_col, k_bin, train=
 
         
         for i in range(temp.shape[0]) :
-            temp2 = temp.iloc[i,:]
+            temp2 = temp.copy().iloc[i,:]
             if train :
                 for j in range(1,temp_digitize[i]) :
                     temp2['bin'] = j
@@ -89,7 +89,6 @@ def LM_transformer2(df,ID_col, T_col,E_col,window,S,measure_T_col, k_bin, train=
     discretized_set = discretized_set.T
     
     return discretized_set.drop(columns = [T_col], axis=1).reset_index(drop=True)
-
 
 def splitID(data,ID_col,p) :
     # Unique ID names

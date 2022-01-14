@@ -26,6 +26,9 @@ from sklearn.base import clone
 
 from ens_surv.utils import *
 
+import warnings
+warnings.filterwarnings("ignore")
+
 # Return bootstrapped Superset, train set(in-bag), oob sample datasets.
 class boot_kfold :
     def __init__(self, base_info, train_df_list, test_df_list,model_specifics_1, model_specifics_2) :         
@@ -105,12 +108,11 @@ class boot_kfold :
             B = self.B
         if K is None :
             K = self.K
-            
-        # Add IPCW weight 
         
-        
-        
-        ######################################################################################################################################################################
+        # censoring model
+        KM_cens = KaplanMeierFitter()
+                    
+ ######################################################################################################################################################################
         # OUTER-LOOP
         BOOTSTRAP_SUPERSETS = []
         IN_BAG_SETS = []
@@ -120,32 +122,47 @@ class boot_kfold :
         for b in range(B) :
             print('######################################################################')
             print(b+1,'/', B,' Resampled')
-            # boot_weight_at_b -> calculates number of inclusion in the b_th bootstrap sample of each exmaples.
+            # leave only selected in bth bootstrapped sample
             boot_weight_at_b = boot_weight(df = train_df_list[0], ID_col = ID_col, boot=boot)
-            
+
             # examples that are included in the bag & bootstrap weight is attached. & all weights are combined.  
             train_df_list_new = []
             for df_temp in train_df_list :
                 df_temp = pd.merge(left= df_temp, right = boot_weight_at_b, how='left', on= ID_col)
                 df_temp = df_temp[df_temp['weight_boot'] != 0] # delete rows with ids exclouded
-                
+
                 # weights are combined
                 weight_cols = [col for col in df_temp.columns if 'weight' in col]
                 df_temp['weight'] = np.prod(df_temp[weight_cols],axis=1) + 10**(-7) #  10^(-8) For making weights positive.
-                df_temp = df_temp.drop('weight_boot', axis=1)
-                
+                df_temp = df_temp.drop('weight_boot', axis=1).reset_index(drop=True)
+
                 train_df_list_new.append(df_temp)
-            
+
             # (oob samples) examples that are excluded from the bag
             train_df_list_oob = []
             for df_temp in train_df_list :
                 df_temp = pd.merge(left= df_temp, right = boot_weight_at_b, how='left', on= ID_col)
                 df_temp = df_temp[df_temp['weight_boot'] == 0] 
-                
+
                 weight_cols = [col for col in df_temp.columns if 'weight' in col]
-                df_temp = df_temp.drop(weight_cols,axis=1) # weights are unnecessary for oobs.
-                
+                df_temp = df_temp.drop(weight_cols,axis=1).reset_index(drop=True) # weights are unnecessary for oobs.
+
                 train_df_list_oob.append(df_temp)
+
+            # Add IPC weight
+            df_temp = train_df_list_new[0].drop_duplicates(ID_col)
+            cens_prob = []
+            for s in S :
+                df_risk = df_temp[df_temp[T_col]>s]
+                # print(df_risk.shape[0])
+                KM_cens.fit(durations = df_risk[T_col], event_observed = abs(df_risk[E_col]-1), weights  = df_risk['weight'])
+
+                cens_prob.append(KM_cens.predict(train_df_list_new[1].loc[train_df_list_new[1].LM == s][T_col]))
+
+            train_df_list_new[1]['IPC_weight'] = 1/pd.Series([item for sublist in cens_prob for item in sublist])
+            train_df_list_new[1].loc[(train_df_list_new[1][E_col]==0)&(train_df_list_new[1][T_col] < (train_df_list_new[1]['LM']+window)), 'IPC_weight'] = 0
+            train_df_list_new[1]['weight'] = train_df_list_new[1]['weight']*train_df_list_new[1]['IPC_weight']
+            train_df_list_new[1] = train_df_list_new[1].drop('IPC_weight',axis=1)
             
             # kfold part - Different IDs are divided into K folds
             kf = kfold(k=K, ID_col=ID_col, df1 = train_df_list_new[0], df2 = train_df_list_new[1], df3_train = train_df_list_new[2], df3_validation = train_df_list_new[3])
@@ -156,6 +173,7 @@ class boot_kfold :
             b_TH_weight = []
             for k in range(K) :
                 print(k+1,'/', K,' fold')
+                # 
                 df1_k_train, df1_k_validation, df2_k_train, df2_k_validation, df3_k_train, df3_k_validation = next(kf)
 
                 # Training 1st stage models
@@ -187,8 +205,7 @@ class boot_kfold :
             b_TH_weight = b_TH_weight/sum(b_TH_weight)*100
             WEIGHT_BAG_SETS.append(b_TH_weight)
             
-        ######################################################################################################################################################################
-        
+ ###################################################################################################################################################################### 
         
         # store 
         self.supersets = BOOTSTRAP_SUPERSETS

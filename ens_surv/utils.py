@@ -53,7 +53,8 @@ def LM_transformer(df,ID_col, T_col,E_col,window,S,measure_T_col) :
                 
     return  super_set.drop(columns = [measure_T_col], axis=1).reset_index(drop=True)
 
-## Data Gen2
+## LM_transformer2(discretizer) - outputs Discretized landmarking dataset
+## input should be output from basic lm_transformer
 def LM_transformer2(df,ID_col, T_col,E_col,window,S,measure_T_col, k_bin, train=True) :
     super_set = df
     
@@ -68,7 +69,7 @@ def LM_transformer2(df,ID_col, T_col,E_col,window,S,measure_T_col, k_bin, train=
 
         
         for i in range(temp.shape[0]) :
-            temp2 = temp.iloc[i,:]
+            temp2 = temp.copy().iloc[i,:]
             if train :
                 for j in range(1,temp_digitize[i]) :
                     temp2['bin'] = j
@@ -90,7 +91,7 @@ def LM_transformer2(df,ID_col, T_col,E_col,window,S,measure_T_col, k_bin, train=
     
     return discretized_set.drop(columns = [T_col], axis=1).reset_index(drop=True)
 
-
+# Train-test split by ID, p is proportion of train set
 def splitID(data,ID_col,p) :
     # Unique ID names
     unique_ids = np.unique(data[ID_col])
@@ -113,6 +114,8 @@ def splitID(data,ID_col,p) :
     
     return data_train, data_test
 
+# boot_weight : outputs boostrapped sample from df
+# 'weight_boot' indicates how many times certain ID is selected in boostrapped sample
 def boot_weight(df, ID_col, boot=True) : 
     unique_ids = np.unique(df[ID_col])
     
@@ -121,7 +124,9 @@ def boot_weight(df, ID_col, boot=True) :
     boot_counts.columns = [ID_col, 'weight_boot']
     
     return pd.merge(left=pd.DataFrame({ID_col : unique_ids}), right=boot_counts, how='left', on=ID_col).fillna(0)
-    
+
+# kfold generator/iterator given ID 
+# outputs kfold train and test sets.
 class kfold :
     def __init__(self, k, ID_col, df1, df2, df3_train, df3_validation) :
         self.k = k
@@ -139,8 +144,6 @@ class kfold :
         # 
         self.k_fold = 0 
         
-        # bootstrap part
-        # TO BE ... 
         
         # where ids in each kth train set and validation set is stored 
         fold_train_id = []
