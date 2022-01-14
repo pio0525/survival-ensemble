@@ -132,9 +132,9 @@ class boot_kfold :
                 df_temp = df_temp[df_temp['weight_boot'] != 0] # delete rows with ids exclouded
 
                 # weights are combined
-                weight_cols = [col for col in df_temp.columns if 'weight' in col]
-                df_temp['weight'] = np.prod(df_temp[weight_cols],axis=1) + 10**(-7) #  10^(-8) For making weights positive.
-                df_temp = df_temp.drop('weight_boot', axis=1).reset_index(drop=True)
+#                weight_cols = [col for col in df_temp.columns if 'weight' in col]
+#                df_temp['weight'] = np.prod(df_temp[weight_cols],axis=1) + 10**(-7) #  10^(-8) For making weights positive.
+#                df_temp = df_temp.drop('weight_boot', axis=1).reset_index(drop=True)
 
                 train_df_list_new.append(df_temp)
 
@@ -154,6 +154,7 @@ class boot_kfold :
             cens_prob = []
             for s in S :
                 df_risk = df_temp[df_temp[T_col]>s]
+                n_risk = df_risk.shape[0]
                 # print(df_risk.shape[0])
                 KM_cens.fit(durations = df_risk[T_col], event_observed = abs(df_risk[E_col]-1), weights  = df_risk['weight'])
 
@@ -161,7 +162,7 @@ class boot_kfold :
 
             train_df_list_new[1]['IPC_weight'] = 1/pd.Series([item for sublist in cens_prob for item in sublist])
             train_df_list_new[1].loc[(train_df_list_new[1][E_col]==0)&(train_df_list_new[1][T_col] < (train_df_list_new[1]['LM']+window)), 'IPC_weight'] = 0
-            train_df_list_new[1]['weight'] = train_df_list_new[1]['weight']*train_df_list_new[1]['IPC_weight']
+            train_df_list_new[1]['weight'] = (train_df_list_new[1]['weight']*train_df_list_new[1]['IPC_weight'])/n_risk
             train_df_list_new[1] = train_df_list_new[1].drop('IPC_weight',axis=1)
             
             # kfold part - Different IDs are divided into K folds
