@@ -6,14 +6,14 @@ from sklearn.model_selection import GroupShuffleSplit
 
 from sksurv.util import Surv
 from sksurv.metrics import concordance_index_ipcw, concordance_index_censored
-from lifelines import KaplanMeierFitter
 
 # models 
-from lifelines import CoxPHFitter
+from lifelines import CoxPHFitter, KaplanMeierFitter
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import RidgeClassifier
+from sklearn.base import clone
 
 # others
 from numpy import inf
@@ -23,6 +23,11 @@ from sklearn.model_selection import KFold
 import itertools
 import copy
 from sklearn.base import clone
+
+
+# squared error 
+def sq_error(a,b) : 
+    return( np.mean( (a-b)**2 ))
 
 ## Data Gen
 def LM_transformer(df,ID_col, T_col,E_col,window,S,measure_T_col) :
@@ -53,7 +58,8 @@ def LM_transformer(df,ID_col, T_col,E_col,window,S,measure_T_col) :
                 
     return  super_set.drop(columns = [measure_T_col], axis=1).reset_index(drop=True)
 
-## Data Gen2
+## LM_transformer2(discretizer) - outputs Discretized landmarking dataset
+## input should be output from basic lm_transformer
 def LM_transformer2(df,ID_col, T_col,E_col,window,S,measure_T_col, k_bin, train=True) :
     super_set = df
     
@@ -90,6 +96,7 @@ def LM_transformer2(df,ID_col, T_col,E_col,window,S,measure_T_col, k_bin, train=
     
     return discretized_set.drop(columns = [T_col], axis=1).reset_index(drop=True)
 
+# Train-test split by ID, p is proportion of train set
 def splitID(data,ID_col,p) :
     # Unique ID names
     unique_ids = np.unique(data[ID_col])
@@ -112,6 +119,8 @@ def splitID(data,ID_col,p) :
     
     return data_train, data_test
 
+# boot_weight : outputs boostrapped sample from df
+# 'weight_boot' indicates how many times certain ID is selected in boostrapped sample
 def boot_weight(df, ID_col, boot=True) : 
     unique_ids = np.unique(df[ID_col])
     
@@ -120,7 +129,9 @@ def boot_weight(df, ID_col, boot=True) :
     boot_counts.columns = [ID_col, 'weight_boot']
     
     return pd.merge(left=pd.DataFrame({ID_col : unique_ids}), right=boot_counts, how='left', on=ID_col).fillna(0)
-    
+
+# kfold generator/iterator given ID 
+# outputs kfold train and test sets.
 class kfold :
     def __init__(self, k, ID_col, df1, df2, df3_train, df3_validation) :
         self.k = k
@@ -138,8 +149,6 @@ class kfold :
         # 
         self.k_fold = 0 
         
-        # bootstrap part
-        # TO BE ... 
         
         # where ids in each kth train set and validation set is stored 
         fold_train_id = []
@@ -187,40 +196,46 @@ class kfold :
             print('Iteration : ',self.k_fold)
             return df1_k_train, df1_k_validation, df2_k_train, df2_k_validation, df3_k_train, df3_k_validation
         
-def Add_IPCW(train_df, evaluation_df, ID_col,E_col,T_col, S, window) :
+def add_weight_column(train_df_list, ID_col, T_col, E_col, boot, S, window) :
     
-    # fitting KM for censoring from each landmark point
-    temp_cens = pd.DataFrame()
+    # add bootstrap weight & seperate inbag/outbag samples
+    boot_weight_at_b = boot_weight(df = train_df_list[0], ID_col = ID_col, boot=boot)
+
+    train_df_list_inbag = [];train_df_list_outbag = []
+    for df_temp in train_df_list :
+        df_inbag = pd.merge(pd.DataFrame.copy(df_temp), right = boot_weight_at_b, how='left', on= ID_col); df_inbag = df_inbag[df_inbag.weight_boot !=0]
+        df_outbag = pd.merge(pd.DataFrame.copy(df_temp), right = boot_weight_at_b, how='left', on= ID_col); df_outbag = df_outbag[df_outbag.weight_boot ==0]
+
+        train_df_list_inbag.append(df_inbag)
+        train_df_list_outbag.append(df_outbag)
+
+    # add IPC weight part
+    KM_cens = KaplanMeierFitter()
+    df_temp = train_df_list_inbag[0].drop_duplicates([ID_col])
+
+    cens_prob = []
     for s in S :
-        # leave only risk set at given landmark point s
-        risk_at_s = train_df.loc[train_df[T_col]>s]
-        # fitting KM for censoring 
-        km_cens = KaplanMeierFitter()
-        km_cens.fit(risk_at_s[T_col], event_observed = abs(risk_at_s[E_col]-1))
+        df_risk = df_temp[df_temp[T_col]>s]
+        df_risk['LM'] = s
+        n_risk = df_risk.shape[0]
 
-        # predict KM for transform_df
-        censor_pred = km_cens.predict(times= evaluation_df[T_col])
-        
-        # size of risk set. 
-        n_risk_at_s = risk_at_s.shape[0]
-        # 1/temp_cens is IPCW for uncensored(administrative censoring 제외)
-        temp_cens[s] = censor_pred * n_risk_at_s
-        
-    temp_cens = temp_cens.reset_index(drop=True)
-    
-    
-    # obtain IPC WEIGHTS for each row
-    w_list = []
-    for i in range(evaluation_df.shape[0]) :
-        s_i = evaluation_df.loc[i,'LM']        
-        if (evaluation_df.loc[i,E_col] == 0) & (evaluation_df.loc[i,T_col] != s_i+window) :
-            w_i =0
-        else :
-            w_i = 1/temp_cens.loc[i,s_i]
-    
-        w_list.append(w_i)
+        KM_cens.fit(durations = df_risk[T_col], event_observed = abs(df_risk[E_col]-1), weights  = df_risk['weight_boot'])
 
-    return np.array(w_list)
+        cens_prob.append(np.array(KM_cens.predict(train_df_list_inbag[1].loc[train_df_list_inbag[1].LM == s].sort_values(ID_col)[T_col]) + 10**(-10))*n_risk)
+
+    cens_prob = [item for sublist in cens_prob for item in sublist]
+    IPC_weight_at_b = train_df_list_inbag[1][[ID_col, 'LM',T_col,E_col]].sort_values(['LM',ID_col])
+    IPC_weight_at_b['cens_prob'] = cens_prob; IPC_weight_at_b['weight_IPC'] = 1/IPC_weight_at_b['cens_prob']
+    IPC_weight_at_b.loc[((IPC_weight_at_b[T_col] < IPC_weight_at_b['LM']+window)&(IPC_weight_at_b[E_col]==0)),'weight_IPC'] = 0 
+
+    IPC_weight_at_b = IPC_weight_at_b[[ID_col, 'LM', 'weight_IPC']]
+    
+    for i in range(1,len(train_df_list_inbag)) :
+        train_df_list_inbag[i] = train_df_list_inbag[i].merge(IPC_weight_at_b,how='left', on = [ID_col, 'LM'])
+        train_df_list_inbag[i]['weight'] = train_df_list_inbag[i]['weight_boot']*train_df_list_inbag[i]['weight_IPC'] + 10**(-10)
+        train_df_list_inbag[i] = train_df_list_inbag[i].drop(['weight_boot','weight_IPC'],axis=1)
+    
+    return(train_df_list_inbag, train_df_list_outbag)
 
 
 def v_year_survival_prob_cox(model, ID_col, test_set, S ,window) :
@@ -238,7 +253,8 @@ def v_year_survival_prob_cox(model, ID_col, test_set, S ,window) :
 
 
 def v_year_survival_prob_ml(model, ID_col, E_col, test_set) :
-    surv_prob = pd.DataFrame(model.predict_proba(test_set.drop([ID_col, E_col, 'weight'], axis=1))[:,0])
+    del_col = [col for col in test_set.columns if "weight" in col]; del_col.append(ID_col) ; del_col.append(E_col)
+    surv_prob = pd.DataFrame(model.predict_proba(test_set.drop(del_col, axis=1))[:,0])
 
     output = pd.concat([test_set[[ID_col, 'LM', 'bin']].reset_index(drop = True), surv_prob],axis=1)
     output = output.pivot_table(index=['LM',ID_col], columns='bin', values=0)
@@ -260,7 +276,7 @@ def level_1_stack(model_specifics_1,ID_col, E_col, T_col, measure_T_col, window,
     
     for g_1 in range(model_specifics.shape[0]) : 
         model_name = model_specifics.loc[g_1,'model_name'] 
-        model_instance = model_specifics.loc[g_1,'model_instance'] 
+        model_instance = model_specifics.loc[g_1,'model_instance']
         model_hyperparams = model_specifics.loc[g_1,'hyperparams']
         model_type = model_specifics.loc[g_1,'type']
         
@@ -269,7 +285,7 @@ def level_1_stack(model_specifics_1,ID_col, E_col, T_col, measure_T_col, window,
         param_combinations = list(itertools.product(*list(model_hyperparams.values())))
         param_names = list(model_hyperparams.keys())
 
-        if model_type == 'cont' :
+        if model_type == 'cont' : # Cox model
             # feed appropriate form of train validation data
             train_data = train_sets[1]
             validation_data = validation_sets[1]
@@ -279,7 +295,7 @@ def level_1_stack(model_specifics_1,ID_col, E_col, T_col, measure_T_col, window,
                 for param_idx in range(len(param_names)) :
                     setattr(model_instance, param_names[param_idx], param_combinations[g_2][param_idx])
 
-                model_instance.fit(df = train_data.drop([ID_col,'weight'],axis=1), duration_col = T_col, event_col = E_col, step_size = 0.01, robust=True)
+                model_instance.fit(df = train_data.drop([ID_col],axis=1), duration_col = T_col, event_col = E_col,weights_col = 'weight' ,step_size = 0.01, robust=True)
                 # print(model_instance.print_summary())
 
                 surv_prob_est = v_year_survival_prob_cox(model = model_instance,ID_col= ID_col ,test_set = validation_data, S=S ,window = window)
@@ -294,8 +310,8 @@ def level_1_stack(model_specifics_1,ID_col, E_col, T_col, measure_T_col, window,
             for g_2 in range(len(param_combinations)) :
                 for param_idx in range(len(param_names)) :
                     setattr(model_instance, param_names[param_idx], param_combinations[g_2][param_idx])
-
-                model_instance.fit(train_data.drop([ID_col, E_col,'weight'],axis=1),train_data[E_col])
+                
+                model_instance.fit(train_data.drop([ID_col, E_col,'weight'],axis=1),train_data[E_col], train_data['weight'])
                 # print(model_instance.print_summary())
 
                 surv_prob_est = v_year_survival_prob_ml(model = model_instance, ID_col = ID_col, E_col = E_col, test_set = validation_data)
@@ -304,3 +320,6 @@ def level_1_stack(model_specifics_1,ID_col, E_col, T_col, measure_T_col, window,
     # out : first column in true value, 
     #       2nd column to end is predicted survival prob from each models with different hyperparam settings
     return out
+
+
+
